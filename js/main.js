@@ -1,8 +1,12 @@
-const maxApples = 256;
+const maxApples = 500; // hard limit of apples spawned per frame (if diffTarget reached before this, does not reach this amount)
+const diffTarget = 0.02; // max difference (1 = invert, 0 = exact match) between target and produced image (diffTarget approaches this value as apples are added per frame)
 const debugMode = false; // use circles instead of apples
 
 const rCanvas = document.getElementById("canvas"); // render canvas
 const rCtx = rCanvas.getContext("2d", {alpha: false});
+
+const dCanvas = document.getElementById("dCanvas"); // debug canvas for figuring out what computer is seeing
+const dCtx = dCanvas.getContext("2d", {alpha: false});
 
 const vCanvas = document.getElementById('vCanvas'); // video canvas (where the video data can be pulled from)
 const vCtx = vCanvas.getContext('2d', {alpha: false});
@@ -39,7 +43,8 @@ function extendCtx(ctx) {
 extendCtx(c);
 extendCtx(rCtx);
 
-const frameTime = 10/24;
+const fps = 12;
+const frameTime = 1/fps;
 const video = document.getElementById("video");
 video.addEventListener('loadeddata', function() {
   start();
@@ -78,7 +83,7 @@ class Apple {
     this.x = x != null? x : Math.floor(Math.random() * width);
     this.y = y != null? y : Math.floor(Math.random() * height);
     this.dir = dir != null? dir : Math.random() * 360;
-    this.scale = scale != null? scale : Math.pow(Math.E, -6.5 + Math.random() * 3); // log distribution
+    this.scale = scale != null? scale : Math.pow(Math.E, -7 + Math.random() * (4 - 2 * tickState.amount / maxApples)); // log distribution
     this.white = white != null? white : Math.random() < 0.5;
     this.core = core != null? core : false // Math.random() < 0.5;
   }
@@ -113,21 +118,20 @@ class Apple {
 }
 
 let apples = []; // array of current apples on the canvas
-
+let totalApples = 0; // total apples spawned in
 let saveState = {};
-function saveCanvasState() { // saves current image data of canvas and apple states for loading a previous state quickly
-  saveState = {};
-  saveState.apples = [];
+function saveCanvasState(state=saveState) { // saves current image data of canvas and apple states for loading a previous state quickly
+  state.apples = [];
   for (let i = 0; i < apples.length; i++)
-    saveState.apples.push(apples[i].clone());
-  saveState.imgData = c.getImageData(0, 0, width, height);
+    state.apples.push(apples[i].clone());
+  state.imgData = c.getImageData(0, 0, width, height);
 }
 
-function loadCanvasState() { // loads saved canvas state
+function loadCanvasState(state=saveState) { // loads saved canvas state
   apples = [];
-  for (let i = 0; i < saveState.apples.length; i++)
-    apples.push(saveState.apples[i].clone());
-  c.putImageData(saveState.imgData, 0, 0);
+  for (let i = 0; i < state.apples.length; i++)
+    apples.push(state.apples[i].clone());
+  c.putImageData(state.imgData, 0, 0);
 }
 
 let firstFrame = true;
@@ -140,18 +144,20 @@ function advanceVideo() { // advances video 1 frame
   vCtx.drawImage(video, 0, 0, width, height);
 }
 
-const sampleSpacing = 1; // distance between each of the sampled pixels
+const sampleSpacing = 2; // distance between each of the sampled pixels
 function diffCalc() { // gets a sample of pixels and compares difference between pixels on apple canvas vs actual canvas
+  let maxDiff = 0;
   let cumDiff = 0;
   let appleImageData = c.getImageData(0, 0, width, height).data;
   let targetImageData = vCtx.getImageData(0, 0, width, height).data;
-  for (let y = Math.floor(sampleSpacing/2); y < height; y += sampleSpacing) {
-    for (let x = Math.floor(sampleSpacing/2); x < width; x += sampleSpacing) {
+  for (let y = sampleSpacing; y < height; y += sampleSpacing) {
+    for (let x = sampleSpacing; x < width; x += sampleSpacing) {
       let index = (y * width + x) * 4;
       cumDiff += Math.abs(targetImageData[index] - appleImageData[index]); // because is monochrome, only need red value
+      maxDiff += 255;
     }
   }
-  return cumDiff;
+  return cumDiff/maxDiff;
 }
 
 function clearCanvas() { // clears apple canvas of all apples
@@ -159,6 +165,12 @@ function clearCanvas() { // clears apple canvas of all apples
   apples = [];
   c.fillStyle = "rgb(255, 255, 255)";
   c.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function renderFrame(apples) { // renders a frame from an apple array
+  for (let i = 0; i < apples.length; i++) {
+    apples[i].add(rCtx);
+  }
 }
 
 const initialPool = 80; // amount of apples to start with
@@ -200,68 +212,98 @@ function spawnApple() { // spawns apple using best of <spawnPool> random spawns
   }
 
   // get best
-  if (candidates.length > 0) candidates[0][0].add();
+  if (candidates.length > 0) {
+    candidates[0][0].add();
+    totalApples++;
+    return candidates[0][1];
+  } else
+    return ogDiff;
 }
 
 const tickState = {
-  step: 2, // steps: 0 - mutate, 1 - spawn, 2 - finished
+  step: 1, // steps: 0 - spawn, 1 - finished
   amount: -1, // amount of operations left
 }
 
+const renderedFrames = [];
 function tickApples() { // updates the apple canvas
   // advance video frame
-  if (tickState.step === 2) {
+  if (tickState.step === 1) {
+    if (video.currentTime === video.duration)
+      return true;
     advanceVideo();
    tickState.step = 0;
    tickState.amount = -1;
   }
 
   switch (tickState.step) {
-    case 0: // update mutations (replace original apple with the best mutation or delete if no good mutation)
-      for (let i = 0; i < apples.length; i++) {
-        // TODO: this
-      }
-      clearCanvas(); // TODO: remove this after finishing above
-      tickState.step++;
-      tickState.amount = -1;
-      break;
-    case 1:
+    case 0:
       // spawn new apples to meet cap
-      if (tickState.amount === -1) tickState.amount = maxApples - apples.length;
-      if (tickState.amount === 0) {
+      if (tickState.amount === -1) {
+        apples = [];
+        tickState.amount = 0;
+      }
+      if (spawnApple() <= diffTarget * Math.pow(tickState.amount / maxApples, 0.25) || tickState.amount >= maxApples-1) { // advance to next step
         tickState.step++;
         tickState.amount = -1;
-      } else {
-        spawnApple();
-        tickState.amount--;
-      }
+      } else
+        tickState.amount++;
       break;
   }
-  if (tickState.step === 2) { // render final apple canvas
-    rCtx.resetTrans();
-    rCtx.fillStyle = "rgb(255,255,255)";
-    rCtx.fillRect(0, 0, rCanvas.width, rCanvas.height);
-    for (let i = 0; i < apples.length; i++) {
-      apples[i].add(rCtx);
-    }
+  if (tickState.step === 1) { // render final apple canvas
+    console.log('render')
+    renderFrame(apples);
+    let state = {};
+    saveCanvasState(state);
+    renderedFrames.push(state.apples);
+    console.log(apples.length);
   }
-  console.log(tickState.step);
+  return false;
 }
 
 let frame = -1;
-function mainLoop() {
+let simFinished = false;
+function simLoop() {
   frame++;
-  for (let i = 0; (i === 0 || tickState.step !== 3) && i < 5; i++) tickApples();
-  if (frame % 5 === 0 && tickState.step !== 3) { // draw update
-    rCtx.resetTrans();
-    rCtx.drawImage(canvas, 0, 0, rCanvas.width, rCanvas.height);
+  for (let i = 0; (i === 0 || tickState.step !== 1) && i < 3; i++) {
+    if (tickApples()) {
+      simFinished = true;
+      break;
+    }
   }
-  requestAnimationFrame(mainLoop);
+  dCtx.drawImage(canvas, 0, 0);
+  document.getElementById("count_label").textContent = "Apples: " + totalApples.toString();
+  if (simFinished) {
+    renderState.nextFrameTime = new Date().getTime();
+    requestAnimationFrame(renderLoop);
+  }
+  else
+    requestAnimationFrame(simLoop);
 }
 
+const renderState = {
+  nextFrameTime: 0,
+  frame: 0
+}
+function renderLoop() {
+  let date = new Date();
+  if (date.getTime() >= renderState.nextFrameTime) {
+    renderState.nextFrameTime += 1000/fps;
+    if (renderState.frame === 0) {
+      rCtx.fillStyle = "white";
+      rCtx.fillRect(0, 0, rCanvas.width, rCanvas.height);
+    }
+    renderFrame(renderedFrames[renderState.frame++]);
+    if (renderState.frame >= renderedFrames.length)
+      renderState.frame = 0;
+  }
+  requestAnimationFrame(renderLoop);
+}
 function start() {
   clearCanvas();
+  rCtx.fillStyle = "white";
+  rCtx.fillRect(0, 0, rCanvas.width, rCanvas.height);
   saveCanvasState();
-  video.currentTime += 5;
-  requestAnimationFrame(mainLoop);
+  // video.currentTime += 5;
+  requestAnimationFrame(simLoop);
 }
